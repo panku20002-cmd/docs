@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Jarvis AI — Multi-language TTS + GPT</title>
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;background:#071423;color:#e6f6fb;margin:0;padding:0}
+  header{padding:12px 18px;background:#0b1220;display:flex;justify-content:space-between;align-items:center}
+  .brand{font-weight:700}
+  .container{max-width:980px;margin:18px auto;padding:12px}
+  .panel{background:#0b2636;padding:14px;border-radius:10px}
+  #log{height:420px;overflow:auto;background:#02131a;padding:10px;border-radius:8px;color:#cfeff4}
+  .controls{display:flex;gap:8px;margin-bottom:10px;align-items:center}
+  .mic{width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#ef4444;color:#fff;cursor:pointer}
+  button,input,select{padding:8px;border-radius:8px;border:none;background:#0e3b47;color:#e6f6fb}
+  input{flex:1}
+  .small{color:#9fb3c2;font-size:0.9rem}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Jarvis AI — Multilingual (GPT + TTS)</div>
+  <div class="small">Local & private — requires OpenAI key on backend</div>
+</header>
+
+<div class="container">
+  <div class="panel">
+    <div class="controls">
+      <div id="mic" class="mic">🎤</div>
+      <input id="textInput" placeholder="Type or speak (e.g. 'Tell me about Newton' / 'Hindi me batao')" />
+      <button id="sendBtn">Send</button>
+      <select id="lang" style="width:160px">
+        <option value="auto">Auto (Browser)</option>
+        <option value="en-US">English (US)</option>
+        <option value="hi-IN">Hindi</option>
+        <option value="bn-IN">Bengali</option>
+        <option value="mr-IN">Marathi</option>
+        <option value="ta-IN">Tamil</option>
+        <option value="te-IN">Telugu</option>
+        <option value="ur-PK">Urdu</option>
+      </select>
+    </div>
+
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+/*
+ Frontend behavior:
+ - capture voice (Web Speech API) OR typed text
+ - POST to /api/chat {message, lang}
+ - receive reply text and speak it using speechSynthesis in the chosen language (if possible)
+ - maintain a chat log in UI
+*/
+
+const logEl = document.getElementById('log');
+const mic = document.getElementById('mic');
+const sendBtn = document.getElementById('sendBtn');
+const input = document.getElementById('textInput');
+const langSel = document.getElementById('lang');
+
+function write(msg, cls='') {
+  const t = new Date().toLocaleTimeString();
+  logEl.innerHTML += `<div style="margin-bottom:8px"><small style="color:#82d0de">${t}</small><div>${msg}</div></div>`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function speakText(text, langTag) {
+  if(!("speechSynthesis" in window)) { write('<i>Browser TTS not supported</i>'); return; }
+  const ut = new SpeechSynthesisUtterance(text);
+  // prefer explicit langTag, else choose based on selection or navigator
+  if(langTag && langTag !== 'auto') ut.lang = langTag;
+  else if(langSel.value && langSel.value !== 'auto') ut.lang = langSel.value;
+  else ut.lang = navigator.language || 'en-US';
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(ut);
+}
+
+async function sendToServer(msg) {
+  if(!msg) return;
+  write(`<b>You:</b> ${msg}`);
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({message: msg, lang: langSel.value})
+    });
+    const j = await res.json();
+    if(!j.ok) {
+      write(`<i style="color:#f9a8d4">Error: ${j.error || JSON.stringify(j)}</i>`);
+      return;
+    }
+    write(`<b>Jarvis:</b> ${j.reply}`);
+    // speak in user's language preference if provided by frontend
+    const speakLang = j.reply_lang || langSel.value || 'auto';
+    speakText(j.reply, speakLang);
+  } catch(e) {
+    write(`<i style="color:#f87171">Server error: ${e.message}</i>`);
+  }
+}
+
+// Speech recognition setup (single-shot listen)
+function listenOnce(preferredLang='auto', timeout=9000) {
+  return new Promise((resolve, reject) => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if(!SpeechRecognition) {
+      reject(new Error('SpeechRecognition not supported'));
+      return;
+    }
+    const rec = new SpeechRecognition();
+    rec.interimResults = false;
+    rec.lang = preferredLang === 'auto' ? (navigator.language || 'en-US') : preferredLang;
+    let done = false;
+    rec.onresult = e => {
+      const txt = e.results[0][0].transcript;
+      done = true;
+      rec.stop();
+      resolve(txt);
+    };
+    rec.onerror = e => {
+      if(!done) { done = true; reject(e.error || 'recognition error'); }
+    };
+    rec.onend = () => { if(!done) resolve(''); };
+    try { rec.start(); } catch(e) { reject(e); }
+    setTimeout(()=> { if(!done) { try{ rec.stop(); }catch(_){} } }, timeout);
+  });
+}
+
+// Mic click -> listen and send
+mic.addEventListener('click', async () => {
+  try {
+    speakText("Listening", langSel.value);
+    const langToUse = langSel.value === 'auto' ? navigator.language || 'en-US' : langSel.value;
+    const txt = await listenOnce(langToUse, 9000);
+    if(txt) {
+      input.value = txt;
+      await sendToServer(txt);
+    } else {
+      write('<i>No speech detected</i>');
+    }
+  } catch(e) {
+    write(`<i>Mic error: ${e}</i>`);
+  }
+});
+
+// Send button
+sendBtn.addEventListener('click', async () => {
+  const txt = input.value.trim();
+  if(!txt) return;
+  input.value = '';
+  await sendToServer(txt);
+});
+
+// keyboard Enter
+input.addEventListener('keydown', async (e) => {
+  if(e.key === 'Enter') { e.preventDefault(); sendBtn.click(); }
+});
+
+// On load show status and greeting
+window.addEventListener('load', () => {
+  write('<b>Jarvis AI</b> ready. Click mic or type a message.');
+  // Check server status
+  fetch('/api/status').then(r=>r.json()).then(j=>{
+    if(j.ok) write('<i>Backend connected.</i>');
+  }).catch(()=> write('<i>Backend not reachable. Start server (server.py) to enable GPT replies.</i>'));
+});
+</script>
+</body>
+</html>
